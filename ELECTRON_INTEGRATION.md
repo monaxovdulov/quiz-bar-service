@@ -1,21 +1,32 @@
-# Electron ↔ BarQuiz Integration Guide
+# Руководство по интеграции Electron ↔ BarQuiz
 
-This note explains how the Electron main process should boot the Python backend, detect the dynamic port, and talk to the HTTP API. Keep it simple: spawn the service, wait for the handshake, then hit `/questions`.
+В этой заметке описано, как основной процесс Electron должен запускать Python-бэкенд, узнавать динамический порт и обращаться к HTTP-API. Держим всё простым: запускаем сервис, ждём handshake, потом стучимся в `/questions`.
 
-## 1. Process Lifecycle & Handshake
+## 1. Жизненный цикл процесса и handshake
 
-- **Spawn command**: use `child_process.spawn('uv', ['run', 'python', '-m', 'barquiz.api'], …)` so the same env that the backend expects (managed by `uv`) is used inside the packaged app. You can swap `uv` for a bundled Python executable as long as it activates the same environment and entry point.
-- **Dynamic port**: set `PORT=0` (or leave empty) in the child’s environment to ask Uvicorn to bind to a random free port. If you need a fixed port, set `PORT=8000` (default in `settings.PORT`).
-- **Handshake**: once Uvicorn is ready it prints a single line to STDOUT in plain text: `SERVER_STARTED_ON_PORT={port}`. Stroke the STDOUT stream, capture chunks as strings, and use `/SERVER_STARTED_ON_PORT=(\d+)/` to detect readiness. Only show the UI once the regex matches.
-- **Other STDOUT/STDERR**: forward everything else to the Electron log for debugging (Ollama errors, FastAPI logs, etc.). The handshake line is the only structured message.
-- **Graceful shutdown**: when the Electron app quits (`app.on('before-quit')` or `app.on('window-all-closed')`), call `child.kill('SIGTERM')`. Also listen for `exit`/`error` to restart or report fatal issues.
+* **Команда запуска**: используйте
+  `child_process.spawn('uv', ['run', 'python', '-m', 'barquiz.api'], …)`,
+  чтобы внутри упакованного приложения использовалась та же среда, которой ожидает бэкенд (управляемая `uv`). Можно заменить `uv` на встроенный исполняемый файл Python, если он активирует ту же среду и тот же entry point.
 
-## 2. API Reference (`barquiz.api`)
+* **Динамический порт**: установите `PORT=0` (или оставьте пустым) в окружении дочернего процесса, чтобы Uvicorn забиндился на случайный свободный порт. Если нужен фиксированный порт, задайте `PORT=8000` (значение по умолчанию в `settings.PORT`).
 
-- **Endpoint**: `GET /questions`
-- **Query params**:
-  - `topic` (optional, string). Defaults to `"барные факты"` if omitted.
-- **Success response** (`200 OK`): JSON shaped exactly like `QuestionsResponse` (`src/barquiz/models.py`):
+* **Handshake**: когда Uvicorn будет готов, он выведет одну строку в STDOUT обычным текстом:
+  `SERVER_STARTED_ON_PORT={port}`.
+  Читайте поток STDOUT, собирайте чанки как строки и используйте регулярку `/SERVER_STARTED_ON_PORT=(\d+)/`, чтобы обнаружить готовность. Показывайте UI только после того, как регэксп сработал.
+
+* **Остальной STDOUT/STDERR**: всё остальное перенаправляйте в лог Electron для отладки (ошибки Ollama, логи FastAPI и т.п.). Строка handshake — единственное структурированное сообщение.
+
+* **Корректное завершение**: когда приложение Electron закрывается (`app.on('before-quit')` или `app.on('window-all-closed')`), вызовите `child.kill('SIGTERM')`. Также слушайте события `exit`/`error`, чтобы при необходимости перезапустить сервис или сообщить о фатальной ошибке.
+
+## 2. API-справка (`barquiz.api`)
+
+* **Endpoint**: `GET /questions`
+
+* **Query-параметры**:
+
+  * `topic` (опционально, строка). По умолчанию `"барные факты"`, если параметр не передан.
+
+* **Успешный ответ** (`200 OK`): JSON строго соответствующий `QuestionsResponse` (`src/barquiz/models.py`):
 
   ```json
   {
@@ -25,20 +36,23 @@ This note explains how the Electron main process should boot the Python backend,
   }
   ```
 
-  `data` always contains 10 `QuestionItem` objects (FastAPI enforces schema).
+  `data` всегда содержит 10 объектов `QuestionItem` (FastAPI проверяет схему).
 
-- **Failures**:
-  - `500 Internal Server Error` — main failure mode when DuckDuckGo search fails, Ollama refuses to answer, or the generator raises.
-  - `422 Unprocessable Entity` — FastAPI validation error (e.g., non-string `topic`).
-  - Use `response.status` to branch in the renderer; `500` means you should show a retry button.
+* **Ошибки**:
 
-## 3. Environment Setup for JS Devs
+  * `500 Internal Server Error` — основной режим отказа, если не сработал поиск DuckDuckGo, Ollama отказалась отвечать или генератор бросил исключение.
+  * `422 Unprocessable Entity` — ошибка валидации FastAPI (например, `topic` не строка).
+  * В рендерере используйте `response.status` для ветвления логики; `500` означает, что стоит показать кнопку «Повторить».
 
-- **Python runtime**: install [uv](https://astral.sh/uv) locally or ship a Python 3.12 runtime plus this project installed via `uv pip install -e .`. The spawn example assumes `uv` is on the PATH; change the command if you embed Python differently.
-- **Dependencies**: run `uv sync` once before packaging so `.venv` (or uv’s cache) contains FastAPI, Uvicorn, etc.
-- **Ollama**: the backend talks to `http://localhost:11434` (see `settings.OLLAMA_HOST`). Make sure Nikita has Ollama installed, the `qwen2.5:7b` model pulled, and the daemon running before he launches the Electron shell.
+## 3. Настройка окружения для JS-разработчиков
 
-## 4. Main-Process Example (`main.js`)
+* **Python-рантайм**: установите локально [uv](https://astral.sh/uv) или поставьте Python 3.13 вместе с этим проектом через `uv pip install -e .`. Пример со `spawn` предполагает, что `uv` есть в `PATH`; измените команду, если вы встраиваете Python другим способом.
+
+* **Зависимости**: один раз выполните `uv sync` перед сборкой, чтобы в `.venv` (или кэше uv) оказались FastAPI, Uvicorn и прочие зависимости.
+
+* **Ollama**: бэкенд ходит в `http://localhost:11434` (см. `settings.OLLAMA_HOST`). Убедитесь, что у Никиты установлена Ollama, модель `qwen2.5:7b` скачана и демон запущен до старта оболочки Electron.
+
+## 4. Пример кода в основном процессе (`main.js`)
 
 ```js
 const { app } = require('electron');
@@ -51,7 +65,7 @@ function startQuizService() {
   return new Promise((resolve, reject) => {
     const env = {
       ...process.env,
-      PORT: process.env.PORT || '0', // ask for a random port
+      PORT: process.env.PORT || '0', // запросить случайный порт
     };
 
     quizProcess = spawn(
@@ -97,14 +111,14 @@ async function fetchQuestions(topic = 'барные факты') {
     throw new Error(`Quiz HTTP ${response.status}`);
   }
   const payload = await response.json();
-  return payload.data; // array of { title, value }
+  return payload.data; // массив объектов { title, value }
 }
 
 app.whenReady().then(async () => {
   await startQuizService();
   const round = await fetchQuestions('истории про виски');
   console.log('Received quiz round', round);
-  // Continue booting BrowserWindow here.
+  // Здесь продолжаем создание BrowserWindow.
 });
 
 app.on('before-quit', () => {
@@ -114,4 +128,4 @@ app.on('before-quit', () => {
 });
 ```
 
-Swap out `fetchQuestions` with your IPC call chain to Renderer. The key bits are: spawn via `uv`, wait for `SERVER_STARTED_ON_PORT=…`, and always kill the child on exit.
+Замените `fetchQuestions` на свою цепочку IPC-вызовов к Renderer. Ключевые моменты: запуск через `uv`, ожидание строки `SERVER_STARTED_ON_PORT=…` и обязательное завершение дочернего процесса при выходе приложения.

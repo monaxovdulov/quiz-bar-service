@@ -108,6 +108,3 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 * `src/barquiz/utils/` — Работа с сетью, поиском и Ollama.
 * `src/barquiz/config.py` — Настройки.
 ```
-
-
-

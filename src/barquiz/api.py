@@ -16,11 +16,13 @@ async def get_questions(topic: str = "барные факты"):
     try:
         questions = await generate_round_questions(topic)
         if not questions:
-            raise HTTPException(status_code=500, detail="Could not generate questions")
+            raise HTTPException(status_code=503, detail="Could not generate questions for the topic")
         return {"data": questions}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Error generating questions")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/debug/search", response_model=DataGatheringResult)

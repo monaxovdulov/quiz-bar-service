@@ -44,23 +44,15 @@ async def gather_quiz_context(topic: str) -> DataGatheringResult | None:
     )
 
 
-async def generate_round_questions(topic: str | None = None) -> list[QuestionItem]:
-    """Формирует вопросы для раунда на основе контекста из поиска и Ollama.
+def _build_fallback_context(topic: str) -> str:
+    return (
+        "Поиск не вернул подходящие тексты. Используй общие знания о барах, напитках и юморе "
+        f"по теме \"{topic}\", чтобы придумать вопросы без привязки к конкретным фактам."
+    )
 
-    Args:
-        topic: Тема для поиска. Если не передана или пустая, выбирается случайная тема.
 
-    Returns:
-        Сформированный список вопросов и ответов для раунда.
-    """
-    selected_topic: str = topic.strip() if topic and topic.strip() else random.choice(TOPICS)
-    selected_vibe: str = random.choice(VIBES).capitalize()
-
-    gather_result = await gather_quiz_context(selected_topic)
-    if not gather_result:
-        return []
-
-    prompt = f"""
+def _build_prompt(selected_topic: str, selected_vibe: str, context_text: str) -> str:
+    return f"""
 Ты — весёлый и немного циничный бармен, ведущий игры "Барный Блеф: Что бы ты выбрал?".
 
 Тема: {selected_topic}.
@@ -68,7 +60,7 @@ async def generate_round_questions(topic: str | None = None) -> list[QuestionIte
 
 Твоя задача: придумай 10 оригинальных и забавных барных вопросов в стиле "Would You Rather" для квиза. Для каждого вопроса добавь краткий ответ, факт или шутку, который подойдёт как правильный вариант.
 
-Используй текст ниже только как источник деталей (ингредиенты, предметы интерьера, атмосферу) и превращай их в абсурдные гипотетические ситуации.
+Используй текст ниже только как источник деталей (ингредиенты, предметы интерьера, атмосферу) и превращай их в абсурдные гипотетические ситуации. Если текст выглядит общим, используй свои знания и фантазию.
 
 Запреты:
 - Не задавай экзаменационные или фактические вопросы по тексту: никаких адресов, часов работы, лет, цен, имён реальных баров или авторов.
@@ -95,11 +87,33 @@ async def generate_round_questions(topic: str | None = None) -> list[QuestionIte
 Текст: "В баре «Пестики» парты вместо столов."
 Вопрос: "Что бы ты выбрал: пить текилу за школьной партой под взглядом учителя ИЛИ из лейки на перемене?"
 Текст: "Автор рецепта добавил можжевельниковый дым и крыжовник."
-Вопрос: "Что бы ты выбрал: вдохнуть дым можжевельника перед тостом ИЛИ бросить крыжовник в пунш как угли?"
+Вопрос: "Что бы ты выбрал: вдохнуть дым можжевльника перед тостом ИЛИ бросить крыжовник в пунш как угли?"
 
 Текст для вдохновения:
-{gather_result.text[:10000]}
+{context_text[:10000]}
     """
+
+
+async def generate_round_questions(topic: str | None = None) -> list[QuestionItem]:
+    """Формирует вопросы для раунда на основе контекста из поиска и Ollama.
+
+    Args:
+        topic: Тема для поиска. Если не передана или пустая, выбирается случайная тема.
+
+    Returns:
+        Сформированный список вопросов и ответов для раунда.
+    """
+    selected_topic: str = topic.strip() if topic and topic.strip() else random.choice(TOPICS)
+    selected_vibe: str = random.choice(VIBES).capitalize()
+
+    gather_result = await gather_quiz_context(selected_topic)
+
+    prompt_context = _build_fallback_context(selected_topic) if not gather_result else gather_result.text
+
+    prompt = _build_prompt(selected_topic, selected_vibe, prompt_context)
+
+    if not gather_result:
+        logger.warning("Falling back to topic-only generation for: %s", selected_topic)
 
     logger.info("Querying Ollama...")
     result = await query_llm(prompt)

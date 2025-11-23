@@ -3,7 +3,7 @@ import logging
 from typing import Final
 from urllib.parse import urlparse
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from barquiz.config import settings
 
@@ -11,7 +11,9 @@ logger = logging.getLogger(__name__)
 
 DDG_REGION: Final[str] = "ru-ru"
 DDG_TIMELIMIT: Final[str] = "y"
-SEARCH_BACKENDS: Final[tuple[str, ...]] = ("html", "api", "lite")
+
+# Удалили SEARCH_BACKENDS, так как перебор больше не нужен
+
 EXCLUDED_DOMAINS: Final[frozenset[str]] = frozenset(
     {
         "github.com",
@@ -109,17 +111,18 @@ def _snippet_is_relevant(snippet: str | None) -> bool:
     return any(keyword in lowered for keyword in SNIPPET_WHITELIST)
 
 
-def _search_with_backend(query: str, backend: str, enforce_snippet: bool) -> list[str]:
+def _perform_ddg_request(query: str, enforce_snippet: bool) -> list[str]:
+    """Выполняет запрос к DuckDuckGo используя настройки по умолчанию."""
     urls: list[str] = []
     seen: set[str] = set()
 
     try:
         with DDGS() as ddgs:
+            # В новой версии не нужно указывать backend, по умолчанию работает 'auto'
             results = ddgs.text(
-                keywords=query,
+                query,
                 region=DDG_REGION,
                 timelimit=DDG_TIMELIMIT,
-                backend=backend,
                 max_results=settings.SEARCH_LIMIT * 2,
             )
 
@@ -145,18 +148,10 @@ def _search_with_backend(query: str, backend: str, enforce_snippet: bool) -> lis
                     break
 
     except Exception as error:  # noqa: BLE001
-        logger.warning("DuckDuckGo search failed (backend=%s): %s", backend, error)
+        logger.warning("DuckDuckGo search failed: %s", error)
         return []
 
     return urls
-
-
-def _search_across_backends(query: str, enforce_snippet: bool) -> list[str]:
-    for backend in SEARCH_BACKENDS:
-        urls = _search_with_backend(query, backend, enforce_snippet)
-        if urls:
-            return urls
-    return []
 
 
 def _search_sync(query: str) -> list[str]:
@@ -165,7 +160,8 @@ def _search_sync(query: str) -> list[str]:
 
     for enforce_snippet in (True, False):
         for query_variant in query_variants:
-            urls = _search_across_backends(query_variant, enforce_snippet)
+            # Больше нет цикла по бэкендам, вызываем напрямую
+            urls = _perform_ddg_request(query_variant, enforce_snippet)
             if urls:
                 return urls
 

@@ -1,11 +1,18 @@
 import asyncio
 import re
+from collections import Counter
+from urllib.parse import unquote
+from time import perf_counter
 from typing import Final
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from barquiz.config import settings
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 REMOVABLE_TAGS: Final[tuple[str, ...]] = (
     "nav",
@@ -35,7 +42,7 @@ MIN_PARAGRAPH_LENGTH: Final[int] = 30
 MAX_CHUNK_LENGTH: Final[int] = 2000
 
 
-async def fetch_urls(urls: list[str], topic: str) -> str:
+async def fetch_urls(urls: list[str], topic: str) -> tuple[str, float]:
     """Скачивает контент параллельно и возвращает очищенный текст.
 
     Args:
@@ -43,25 +50,60 @@ async def fetch_urls(urls: list[str], topic: str) -> str:
         topic: Тема запроса для проверки релевантности.
 
     Returns:
-        Очищенный объединённый текст из успешно загруженных страниц.
+        Кортеж из очищенного текста из успешно загруженных страниц и времени загрузки в мс.
     """
+    started = perf_counter()
     async with httpx.AsyncClient(timeout=settings.FETCH_TIMEOUT, follow_redirects=True) as client:
-        tasks = [client.get(url) for url in urls]
+        tasks = [_fetch_single_url(client, url) for url in urls]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
 
     full_text: list[str] = []
+    status_buckets: Counter[str] = Counter()
     for response in responses:
         if not isinstance(response, httpx.Response):
+            status_buckets["failed"] += 1
             continue
 
         if response.status_code != httpx.codes.OK:
+            status_buckets[f"{response.status_code//100}xx"] += 1
             continue
 
+        status_buckets[f"{response.status_code//100}xx"] += 1
         cleaned_text = _extract_readable_text(response.text, topic)
         if cleaned_text:
             full_text.append(cleaned_text[:MAX_CHUNK_LENGTH])
 
-    return "\n\n".join(full_text)
+    elapsed_ms = (perf_counter() - started) * 1000
+    combined_text = "\n\n".join(full_text)
+    logger.info(
+        "fetch.completed",
+        urls_count=len(urls),
+        pages_used=len(full_text),
+        network_latency_download_ms=elapsed_ms,
+        text_length=len(combined_text),
+        ok=status_buckets.get("2xx", 0),
+        redirects=status_buckets.get("3xx", 0),
+        client_errors=status_buckets.get("4xx", 0),
+        server_errors=status_buckets.get("5xx", 0),
+        failed=status_buckets.get("failed", 0),
+    )
+
+    return combined_text, elapsed_ms
+
+
+async def _fetch_single_url(client: httpx.AsyncClient, url: str) -> httpx.Response | Exception:
+    started = perf_counter()
+    readable_url = unquote(url)
+    try:
+        response = await client.get(url)
+        latency_ms = (perf_counter() - started) * 1000
+        logger.info("http.fetched", url=readable_url, status=response.status_code, latency_ms=latency_ms)
+        return response
+    except Exception as exc:
+        latency_ms = (perf_counter() - started) * 1000
+        error_msg = str(exc) or repr(exc)
+        logger.warning("http.fetch_failed", url=readable_url, error=error_msg, latency_ms=latency_ms)
+        return exc
 
 
 def _extract_readable_text(html: str, topic: str) -> str:

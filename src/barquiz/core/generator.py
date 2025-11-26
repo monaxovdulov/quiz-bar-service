@@ -1,39 +1,53 @@
-import logging
 import random
 
+import structlog
+from barquiz.config import settings
 from barquiz.core.data import TOPICS, VIBES
 from barquiz.models import DataGatheringResult, QuestionItem
 from barquiz.utils.http_client import fetch_urls
 from barquiz.utils.ollama import query_llm
 from barquiz.utils.search import search_ddg
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
-async def gather_quiz_context(topic: str) -> DataGatheringResult | None:
+async def gather_quiz_context(topic: str) -> tuple[DataGatheringResult | None, dict[str, float]]:
     """Ищет источники и собирает очищенный текстовый контекст.
 
     Args:
         topic: Тема запроса.
 
     Returns:
-        Результат с URL-адресами, текстом и метаданными или None, если ничего не найдено.
+        Кортеж из результата с URL-адресами, текстом и метаданными или None, если ничего не найдено,
+        а также словаря сетевых метрик.
     """
-    logger.info("Searching for topic: %s", topic)
-    urls = await search_ddg(topic)
+    timings: dict[str, float] = {}
+
+    logger.info("search.start", topic=topic)
+    urls, search_latency = await search_ddg(topic)
+    timings["network_latency_search_ms"] = search_latency
 
     if not urls:
-        logger.warning("No URLs found")
-        return None
+        logger.warning("search.no_urls", topic=topic)
+        return None, timings
 
-    logger.info("Fetching %s URLs...", len(urls))
-    context_text = await fetch_urls(urls, topic)
+    logger.info("fetch.start", urls_count=len(urls))
+    context_text, download_latency = await fetch_urls(urls, topic)
+    timings["network_latency_download_ms"] = download_latency
 
     if not context_text:
-        logger.warning("No text fetched for topic: %s", topic)
-        return None
+        logger.warning("fetch.no_text", topic=topic, urls_count=len(urls))
+        return None, timings
 
     text_preview = context_text[:500]
+
+    logger.info(
+        "gather.completed",
+        topic=topic,
+        text_length=len(context_text),
+        network_latency_search_ms=timings["network_latency_search_ms"],
+        network_latency_download_ms=timings["network_latency_download_ms"],
+    )
 
     return DataGatheringResult(
         topic=topic,
@@ -41,7 +55,7 @@ async def gather_quiz_context(topic: str) -> DataGatheringResult | None:
         text=context_text,
         text_length=len(context_text),
         text_preview=text_preview,
-    )
+    ), timings
 
 
 def _build_fallback_context(topic: str) -> str:
@@ -106,16 +120,32 @@ async def generate_round_questions(topic: str | None = None) -> list[QuestionIte
     selected_topic: str = topic.strip() if topic and topic.strip() else random.choice(TOPICS)
     selected_vibe: str = random.choice(VIBES).capitalize()
 
-    gather_result = await gather_quiz_context(selected_topic)
+    gather_result, network_timings = await gather_quiz_context(selected_topic)
 
     prompt_context = _build_fallback_context(selected_topic) if not gather_result else gather_result.text
 
     prompt = _build_prompt(selected_topic, selected_vibe, prompt_context)
 
     if not gather_result:
-        logger.warning("Falling back to topic-only generation for: %s", selected_topic)
+        logger.warning("generator.fallback", topic=selected_topic)
 
-    logger.info("Querying Ollama...")
-    result = await query_llm(prompt)
+    logger.info("ollama.query.start", model=settings.OLLAMA_MODEL)
+    llm_result, inference_latency_ms = await query_llm(prompt)
 
-    return [QuestionItem(**item) for item in result]
+    network_latency_ms = network_timings.get("network_latency_search_ms", 0.0) + network_timings.get(
+        "network_latency_download_ms", 0.0
+    )
+
+    logger.info(
+        "quiz_generation.completed",
+        topic=selected_topic,
+        vibe=selected_vibe,
+        network_latency_ms=network_latency_ms,
+        network_latency_search_ms=network_timings.get("network_latency_search_ms", 0.0),
+        network_latency_download_ms=network_timings.get("network_latency_download_ms", 0.0),
+        inference_latency_ms=inference_latency_ms,
+        urls_count=len(gather_result.urls) if gather_result else 0,
+        used_fallback=not gather_result,
+    )
+
+    return [QuestionItem(**item) for item in llm_result]

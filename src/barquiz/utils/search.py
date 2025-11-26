@@ -1,13 +1,15 @@
 import asyncio
-import logging
 from typing import Final
 from urllib.parse import urlparse
+from time import perf_counter
 
 from ddgs import DDGS
 
 from barquiz.config import settings
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 DDG_REGION: Final[str] = "ru-ru"
 DDG_TIMELIMIT: Final[str] = "y"
@@ -148,7 +150,7 @@ def _perform_ddg_request(query: str, enforce_snippet: bool) -> list[str]:
                     break
 
     except Exception as error:  # noqa: BLE001
-        logger.warning("DuckDuckGo search failed: %s", error)
+        logger.warning("ddg.search.failed", error=str(error), query=query)
         return []
 
     return urls
@@ -168,13 +170,22 @@ def _search_sync(query: str) -> list[str]:
     return []
 
 
-async def search_ddg(query: str) -> list[str]:
+async def search_ddg(query: str) -> tuple[list[str], float]:
     """Асинхронная обёртка для поискового запроса DuckDuckGo.
 
     Args:
         query: Текст поискового запроса.
 
     Returns:
-        Список найденных URL-адресов, очищенных от технических доменов.
+        Список найденных URL-адресов, очищенных от технических доменов, и время выполнения в мс.
     """
-    return await asyncio.to_thread(_search_sync, query)
+    started = perf_counter()
+    try:
+        urls = await asyncio.wait_for(asyncio.to_thread(_search_sync, query), timeout=5)
+    except asyncio.TimeoutError:
+        elapsed_ms = (perf_counter() - started) * 1000
+        logger.warning("ddg.search.timeout", query=query, timeout_s=5, elapsed_ms=elapsed_ms)
+        raise
+    elapsed_ms = (perf_counter() - started) * 1000
+    logger.info("ddg.search.completed", query=query, urls_found=len(urls), network_latency_search_ms=elapsed_ms)
+    return urls, elapsed_ms

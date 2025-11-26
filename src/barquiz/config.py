@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     # Ollama
     OLLAMA_HOST: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5:7b"
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "console"  # console | json
     
     # Logic
     SEARCH_LIMIT: int = 10
